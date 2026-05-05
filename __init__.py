@@ -54,6 +54,9 @@ IMPORT_GEORASTER = True
 IMPORT_OSM = True
 IMPORT_SHP = True
 IMPORT_ASC = True
+IMPORT_GPKG = True
+IMPORT_GEOJSON = True
+IMPORT_WFS = True
 DELAUNAY = True
 TERRAIN_NODES = True
 TERRAIN_RECLASS = True
@@ -156,6 +159,12 @@ if IMPORT_SHP:
 	from .operators import io_import_shp
 if IMPORT_ASC:
 	from .operators import io_import_asc
+if IMPORT_GPKG:
+	from .operators import io_import_gpkg
+if IMPORT_GEOJSON:
+	from .operators import io_import_geojson
+if IMPORT_WFS:
+	from .operators import io_import_wfs
 if DELAUNAY:
 	from .operators import mesh_delaunay_voronoi
 if TERRAIN_NODES:
@@ -203,6 +212,12 @@ class VIEW3D_MT_menu_gis_import(bpy.types.Menu):
 			self.layout.operator("importgis.osm_file", icon_value=icons_dict["osm"].icon_id, text="Open Street Map xml (.osm)")
 		if IMPORT_ASC:
 			self.layout.operator('importgis.asc_file', icon_value=icons_dict["asc"].icon_id, text="ESRI ASCII Grid (.asc)")
+		if IMPORT_GPKG:
+			self.layout.operator('importgis.gpkg_file_dialog', icon_value=icons_dict["shp"].icon_id, text="GeoPackage (.gpkg)")
+		if IMPORT_GEOJSON:
+			self.layout.operator('importgis.geojson_file_dialog', icon_value=icons_dict["shp"].icon_id, text="GeoJSON (.geojson, .json)")
+		if IMPORT_WFS:
+			self.layout.operator('importgis.wfs_service_dialog', icon_value=icons_dict["shp"].icon_id, text="WFS Service (.wfs)")
 
 class VIEW3D_MT_menu_gis_export(bpy.types.Menu):
 	bl_label = "Export"
@@ -321,6 +336,12 @@ def register():
 		io_import_osm.register()
 	if IMPORT_ASC:
 		io_import_asc.register()
+	if IMPORT_GPKG:
+		io_import_gpkg.register()
+	if IMPORT_GEOJSON:
+		io_import_geojson.register()
+	if IMPORT_WFS:
+		io_import_wfs.register()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.register()
 	if DROP:
@@ -393,6 +414,12 @@ def unregister():
 		io_import_osm.unregister()
 	if IMPORT_ASC:
 		io_import_asc.unregister()
+	if IMPORT_GPKG:
+		io_import_gpkg.unregister()
+	if IMPORT_GEOJSON:
+		io_import_geojson.unregister()
+	if IMPORT_WFS:
+		io_import_wfs.unregister()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.unregister()
 	if DROP:

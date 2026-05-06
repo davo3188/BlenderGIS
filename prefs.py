@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 log = logging.getLogger(__name__)
@@ -13,6 +14,7 @@ from .core.proj.reproj import MapTilerCoordinates
 from .core.proj.srs import SRS
 from .core.checkdeps import HAS_GDAL, HAS_PYPROJ, HAS_PIL, HAS_IMGIO
 from .core import settings
+from .core.basemaps.servicesDefs import SOURCES, GRIDS
 
 PKG = __package__
 
@@ -52,6 +54,8 @@ DEFAULT_OVERPASS_SERVER =  [
 	("http://overpass.openstreetmap.fr/api/interpreter", 'overpass.openstreetmap.fr', 'French Overpass API instance'),
 	("https://overpass.kumi.systems/api/interpreter", 'overpass.kumi.systems', 'Kumi Systems Overpass Instance')
 ]
+
+DEFAULT_CUSTOM_BASEMAPS = []
 
 #default filter tags for OSM import
 DEFAULT_OSM_TAGS = [
@@ -225,6 +229,24 @@ class BGIS_PREFS(AddonPreferences):
 		name = "Resampling method",
 		description = "Choose GDAL's resampling method used for reprojection",
 		items = [ ('NN', 'Nearest Neighboor', ''), ('BL', 'Bilinear', ''), ('CB', 'Cubic', ''), ('CBS', 'Cubic Spline', ''), ('LCZ', 'Lanczos', '') ]
+		)
+
+	################
+	#Custom basemap sources
+
+	customBasemapsJson: StringProperty(default=json.dumps(DEFAULT_CUSTOM_BASEMAPS))
+
+	def listCustomBasemaps(self, context):
+		prefs = context.preferences.addons[PKG].preferences
+		sources = json.loads(prefs.customBasemapsJson)
+		if not sources:
+			return [('NONE', '(none)', '')]
+		return [(s['key'], s['name'], s.get('description', '')) for s in sources]
+
+	customBasemaps: EnumProperty(
+		name = "Custom source",
+		description = "User-defined WMS/WMTS basemap sources available in the map viewer",
+		items = listCustomBasemaps
 		)
 
 	################
@@ -862,6 +884,338 @@ class BGIS_OT_edit_overpass_server(Operator):
 		return {'FINISHED'}
 
 
+#################
+# Helpers for custom basemap source operators
+
+def _list_grids(self, context):
+	return [(k, k, v.get('CRS', k)) for k, v in GRIDS.items()]
+
+
+def _build_source_entry(op, key):
+	"""Build a full custom basemap entry dict for JSON storage."""
+	fmt_short = op.layerFormat  # 'png' or 'jpeg'
+
+	if op.serviceType == 'WMS':
+		crs_key = 'SRS' if op.wmsVersion == '1.1.1' else 'CRS'
+		url_tpl = {
+			'BASE_URL':    op.baseUrl,
+			'SERVICE':     'WMS',
+			'VERSION':     op.wmsVersion,
+			'REQUEST':     'GetMap',
+			crs_key:       '{CRS}',
+			'LAYERS':      '{LAY}',
+			'FORMAT':      'image/{FORMAT}',
+			'STYLES':      '{STYLE}',
+			'BBOX':        '{BBOX}',
+			'WIDTH':       '{WIDTH}',
+			'HEIGHT':      '{HEIGHT}',
+			'TRANSPARENT': 'FALSE',
+		}
+	else:  # WMTS
+		url_tpl = {
+			'BASE_URL':      op.baseUrl,
+			'SERVICE':       'WMTS',
+			'VERSION':       '1.0.0',
+			'REQUEST':       'GetTile',
+			'LAYER':         '{LAY}',
+			'STYLE':         '{STYLE}',
+			'FORMAT':        'image/{FORMAT}',
+			'TILEMATRIXSET': '{MATRIX}',
+			'TILEMATRIX':    '{Z}',
+			'TILEROW':       '{Y}',
+			'TILECOL':       '{X}',
+		}
+
+	entry = {
+		'key':         key,
+		'name':        op.sourceName,
+		'description': op.sourceDesc,
+		'service':     op.serviceType,
+		'grid':        op.gridName,
+		'layers': {
+			'LYR': {
+				'urlKey':      op.layerId,
+				'name':        op.layerName if op.layerName else op.layerId,
+				'description': '',
+				'format':      fmt_short,
+				'style':       op.layerStyle,
+				'zmin':        op.zmin,
+				'zmax':        op.zmax,
+			}
+		},
+		'urlTemplate': url_tpl,
+		'referer':     op.baseUrl,
+	}
+	if op.serviceType == 'WMTS':
+		entry['matrix'] = op.matrixSet
+	return entry
+
+
+def _entry_to_sources_dict(entry):
+	"""Return a SOURCES-compatible dict (strips the internal 'key' field)."""
+	return {k: v for k, v in entry.items() if k != 'key'}
+
+
+#################
+# Collection of operators to manage custom basemap sources
+
+class BGIS_OT_add_basemap_source(Operator):
+	bl_idname = "bgis.add_basemap_source"
+	bl_description = 'Add a custom WMS or WMTS basemap source to the map viewer'
+	bl_label = "Add basemap source"
+	bl_options = {'INTERNAL'}
+
+	sourceName: StringProperty(
+		name="Name",
+		description="Display name shown in the map viewer source dropdown")
+	sourceDesc: StringProperty(
+		name="Description",
+		description="Short description of this source")
+	serviceType: EnumProperty(
+		name="Service type",
+		items=[('WMS', 'WMS', 'OGC Web Map Service'), ('WMTS', 'WMTS', 'OGC Web Map Tile Service')],
+		default='WMS')
+	baseUrl: StringProperty(
+		name="Base URL",
+		description="Service base URL without query parameters")
+	wmsVersion: EnumProperty(
+		name="WMS version",
+		items=[('1.1.1', '1.1.1', ''), ('1.3.0', '1.3.0', '')],
+		default='1.1.1')
+	gridName: EnumProperty(
+		name="Tile grid",
+		description="Tile matrix / projection grid used by this service",
+		items=_list_grids)
+	matrixSet: StringProperty(
+		name="Matrix set ID",
+		description="WMTS TileMatrixSet identifier (e.g. GoogleMapsCompatible)")
+	layerId: StringProperty(
+		name="Layer ID",
+		description="Layer identifier sent to the service in tile requests")
+	layerName: StringProperty(
+		name="Layer name",
+		description="Display name for this layer in the map viewer")
+	layerFormat: EnumProperty(
+		name="Format",
+		items=[('png', 'PNG', ''), ('jpeg', 'JPEG', '')],
+		default='png')
+	layerStyle: StringProperty(
+		name="Style",
+		description="Style name sent to the service (leave blank for default)",
+		default='')
+	zmin: IntProperty(name="Min zoom", default=0, min=0, max=22)
+	zmax: IntProperty(name="Max zoom", default=20, min=0, max=22)
+
+	def check(self, context):
+		return True
+
+	def invoke(self, context, event):
+		return context.window_manager.invoke_props_dialog(self, width=420)
+
+	def draw(self, context):
+		layout = self.layout
+		layout.prop(self, 'sourceName')
+		layout.prop(self, 'sourceDesc')
+		layout.prop(self, 'serviceType')
+		layout.prop(self, 'baseUrl')
+		layout.prop(self, 'gridName')
+		if self.serviceType == 'WMS':
+			layout.prop(self, 'wmsVersion')
+		else:
+			layout.prop(self, 'matrixSet')
+		layout.separator()
+		layout.label(text="Layer settings:")
+		layout.prop(self, 'layerId')
+		layout.prop(self, 'layerName')
+		layout.prop(self, 'layerFormat')
+		layout.prop(self, 'layerStyle')
+		row = layout.row()
+		row.prop(self, 'zmin')
+		row.prop(self, 'zmax')
+
+	def execute(self, context):
+		if not self.sourceName.strip():
+			self.report({'ERROR'}, "Name is required")
+			return {'CANCELLED'}
+		if not self.baseUrl.strip():
+			self.report({'ERROR'}, "Base URL is required")
+			return {'CANCELLED'}
+		if not self.layerId.strip():
+			self.report({'ERROR'}, "Layer ID is required")
+			return {'CANCELLED'}
+		if self.serviceType == 'WMTS' and not self.matrixSet.strip():
+			self.report({'ERROR'}, "Matrix set ID is required for WMTS")
+			return {'CANCELLED'}
+
+		key = 'custom_' + hashlib.md5(os.urandom(16)).hexdigest()[:8]
+		entry = _build_source_entry(self, key)
+
+		prefs = context.preferences.addons[PKG].preferences
+		sources = json.loads(prefs.customBasemapsJson)
+		sources.append(entry)
+		prefs.customBasemapsJson = json.dumps(sources)
+
+		SOURCES[key] = _entry_to_sources_dict(entry)
+		context.area.tag_redraw()
+		return {'FINISHED'}
+
+
+class BGIS_OT_rmv_basemap_source(Operator):
+	bl_idname = "bgis.rmv_basemap_source"
+	bl_description = 'Remove the selected custom basemap source'
+	bl_label = "Remove"
+	bl_options = {'INTERNAL'}
+
+	def execute(self, context):
+		prefs = context.preferences.addons[PKG].preferences
+		key = prefs.customBasemaps
+		if key and key != 'NONE':
+			sources = json.loads(prefs.customBasemapsJson)
+			sources = [s for s in sources if s.get('key') != key]
+			prefs.customBasemapsJson = json.dumps(sources)
+			if key in SOURCES:
+				del SOURCES[key]
+		context.area.tag_redraw()
+		return {'FINISHED'}
+
+
+class BGIS_OT_reset_basemap_sources(Operator):
+	bl_idname = "bgis.reset_basemap_sources"
+	bl_description = 'Remove all custom basemap sources'
+	bl_label = "Clear all"
+	bl_options = {'INTERNAL'}
+
+	def execute(self, context):
+		prefs = context.preferences.addons[PKG].preferences
+		try:
+			sources = json.loads(prefs.customBasemapsJson)
+			for entry in sources:
+				key = entry.get('key')
+				if key and key in SOURCES:
+					del SOURCES[key]
+		except Exception:
+			pass
+		prefs.customBasemapsJson = json.dumps(DEFAULT_CUSTOM_BASEMAPS)
+		context.area.tag_redraw()
+		return {'FINISHED'}
+
+
+class BGIS_OT_edit_basemap_source(Operator):
+	bl_idname = "bgis.edit_basemap_source"
+	bl_description = 'Edit the selected custom basemap source'
+	bl_label = "Edit"
+	bl_options = {'INTERNAL'}
+
+	sourceName: StringProperty(name="Name")
+	sourceDesc: StringProperty(name="Description")
+	serviceType: EnumProperty(
+		name="Service type",
+		items=[('WMS', 'WMS', 'OGC Web Map Service'), ('WMTS', 'WMTS', 'OGC Web Map Tile Service')],
+		default='WMS')
+	baseUrl: StringProperty(name="Base URL")
+	wmsVersion: EnumProperty(
+		name="WMS version",
+		items=[('1.1.1', '1.1.1', ''), ('1.3.0', '1.3.0', '')],
+		default='1.1.1')
+	gridName: EnumProperty(name="Tile grid", items=_list_grids)
+	matrixSet: StringProperty(name="Matrix set ID")
+	layerId: StringProperty(name="Layer ID")
+	layerName: StringProperty(name="Layer name")
+	layerFormat: EnumProperty(
+		name="Format",
+		items=[('png', 'PNG', ''), ('jpeg', 'JPEG', '')],
+		default='png')
+	layerStyle: StringProperty(name="Style", default='')
+	zmin: IntProperty(name="Min zoom", default=0, min=0, max=22)
+	zmax: IntProperty(name="Max zoom", default=20, min=0, max=22)
+
+	# Key of the entry currently being edited, stored at class level
+	_editing_key = ''
+
+	def check(self, context):
+		return True
+
+	def invoke(self, context, event):
+		prefs = context.preferences.addons[PKG].preferences
+		key = prefs.customBasemaps
+		if not key or key == 'NONE':
+			return {'CANCELLED'}
+
+		sources = json.loads(prefs.customBasemapsJson)
+		entry = next((s for s in sources if s.get('key') == key), None)
+		if entry is None:
+			return {'CANCELLED'}
+
+		self.sourceName  = entry.get('name', '')
+		self.sourceDesc  = entry.get('description', '')
+		self.serviceType = entry.get('service', 'WMS')
+		self.gridName    = entry.get('grid', 'WM')
+		self.matrixSet   = entry.get('matrix', '')
+		self.baseUrl     = entry.get('urlTemplate', {}).get('BASE_URL', '')
+		self.wmsVersion  = entry.get('urlTemplate', {}).get('VERSION', '1.1.1')
+		layer = entry.get('layers', {}).get('LYR', {})
+		self.layerId     = layer.get('urlKey', '')
+		self.layerName   = layer.get('name', '')
+		self.layerFormat = layer.get('format', 'png')
+		self.layerStyle  = layer.get('style', '')
+		self.zmin        = layer.get('zmin', 0)
+		self.zmax        = layer.get('zmax', 20)
+
+		BGIS_OT_edit_basemap_source._editing_key = key
+		return context.window_manager.invoke_props_dialog(self, width=420)
+
+	def draw(self, context):
+		layout = self.layout
+		layout.prop(self, 'sourceName')
+		layout.prop(self, 'sourceDesc')
+		layout.prop(self, 'serviceType')
+		layout.prop(self, 'baseUrl')
+		layout.prop(self, 'gridName')
+		if self.serviceType == 'WMS':
+			layout.prop(self, 'wmsVersion')
+		else:
+			layout.prop(self, 'matrixSet')
+		layout.separator()
+		layout.label(text="Layer settings:")
+		layout.prop(self, 'layerId')
+		layout.prop(self, 'layerName')
+		layout.prop(self, 'layerFormat')
+		layout.prop(self, 'layerStyle')
+		row = layout.row()
+		row.prop(self, 'zmin')
+		row.prop(self, 'zmax')
+
+	def execute(self, context):
+		if not self.sourceName.strip():
+			self.report({'ERROR'}, "Name is required")
+			return {'CANCELLED'}
+		if not self.baseUrl.strip():
+			self.report({'ERROR'}, "Base URL is required")
+			return {'CANCELLED'}
+		if not self.layerId.strip():
+			self.report({'ERROR'}, "Layer ID is required")
+			return {'CANCELLED'}
+		if self.serviceType == 'WMTS' and not self.matrixSet.strip():
+			self.report({'ERROR'}, "Matrix set ID is required for WMTS")
+			return {'CANCELLED'}
+
+		key = BGIS_OT_edit_basemap_source._editing_key
+		if not key:
+			return {'CANCELLED'}
+
+		entry = _build_source_entry(self, key)
+
+		prefs = context.preferences.addons[PKG].preferences
+		sources = json.loads(prefs.customBasemapsJson)
+		sources = [s for s in sources if s.get('key') != key]
+		sources.append(entry)
+		prefs.customBasemapsJson = json.dumps(sources)
+
+		SOURCES[key] = _entry_to_sources_dict(entry)
+		context.area.tag_redraw()
+		return {'FINISHED'}
+
+
 classes = [
 BGIS_OT_pref_show,
 BGIS_PREFS,
@@ -880,7 +1234,11 @@ BGIS_OT_edit_dem_server,
 BGIS_OT_add_overpass_server,
 BGIS_OT_rmv_overpass_server,
 BGIS_OT_reset_overpass_server,
-BGIS_OT_edit_overpass_server
+BGIS_OT_edit_overpass_server,
+BGIS_OT_add_basemap_source,
+BGIS_OT_rmv_basemap_source,
+BGIS_OT_reset_basemap_sources,
+BGIS_OT_edit_basemap_source,
 ]
 
 def register():
@@ -893,12 +1251,37 @@ def register():
 			bpy.utils.unregister_class(cls)
 			bpy.utils.register_class(cls)
 
-	# set default cache folder
 	prefs = bpy.context.preferences.addons[PKG].preferences
+
+	# set default cache folder
 	if prefs.cacheFolder == '':
 		prefs.cacheFolder = APP_DATA
 
+	# Restore user-defined basemap sources into SOURCES
+	try:
+		sources = json.loads(prefs.customBasemapsJson)
+		for entry in sources:
+			key = entry.get('key')
+			if key:
+				SOURCES[key] = _entry_to_sources_dict(entry)
+	except Exception as e:
+		log.warning("Failed to restore custom basemap sources: {}".format(e))
+
 
 def unregister():
+	# Remove user-defined basemap sources from SOURCES
+	try:
+		prefs = bpy.context.preferences.addons[PKG].preferences
+		sources = json.loads(prefs.customBasemapsJson)
+		for entry in sources:
+			key = entry.get('key')
+			if key and key in SOURCES:
+				del SOURCES[key]
+	except Exception:
+		# Fallback: remove any key starting with 'custom_'
+		for key in list(SOURCES.keys()):
+			if key.startswith('custom_'):
+				del SOURCES[key]
+
 	for cls in classes:
 		bpy.utils.unregister_class(cls)

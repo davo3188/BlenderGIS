@@ -58,6 +58,7 @@ IMPORT_GPKG = True
 IMPORT_GEOJSON = True
 IMPORT_WFS = True
 IMPORT_WMS = True
+CUSTOM_BASEMAP = True
 DELAUNAY = True
 TERRAIN_NODES = True
 TERRAIN_RECLASS = True
@@ -168,6 +169,8 @@ if IMPORT_WFS:
 	from .operators import io_import_wfs
 if IMPORT_WMS:
 	from .operators import io_import_wms
+if CUSTOM_BASEMAP:
+	from .operators import io_import_custom_basemap
 if DELAUNAY:
 	from .operators import mesh_delaunay_voronoi
 if TERRAIN_NODES:
@@ -235,6 +238,8 @@ class VIEW3D_MT_menu_gis_webgeodata(bpy.types.Menu):
 	def draw(self, context):
 		if BASEMAPS:
 			self.layout.operator("view3d.map_start", icon_value=icons_dict["layers"].icon_id)
+		if CUSTOM_BASEMAP:
+			self.layout.operator("importgis.custom_basemap_url", icon='ADD', text="Add custom basemap (WMS/WMTS)")
 		if IMPORT_OSM:
 			self.layout.operator("importgis.osm_query", icon_value=icons_dict["osm"].icon_id)
 		if GET_DEM:
@@ -349,6 +354,8 @@ def register():
 		io_import_wfs.register()
 	if IMPORT_WMS:
 		io_import_wms.register()
+	if CUSTOM_BASEMAP:
+		io_import_custom_basemap.register()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.register()
 	if DROP:
@@ -429,6 +436,8 @@ def unregister():
 		io_import_wfs.unregister()
 	if IMPORT_WMS:
 		io_import_wms.unregister()
+	if CUSTOM_BASEMAP:
+		io_import_custom_basemap.unregister()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.unregister()
 	if DROP:

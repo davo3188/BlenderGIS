@@ -75,7 +75,9 @@ def _get_wms_capabilities(base_url, version='1.1.1'):
 		if _strip_ns(elem.tag) != 'Layer':
 			continue
 		name_elem = next(
-			(c for c in elem if _strip_ns(c.tag) == 'Name' and c.text), None)
+			(c for c in elem
+			 if _strip_ns(c.tag) in ('Name', 'Identifier') and c.text),
+			None)
 		if name_elem is None:
 			continue
 		name = name_elem.text.strip()

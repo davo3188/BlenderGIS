@@ -57,6 +57,7 @@ IMPORT_ASC = True
 IMPORT_GPKG = True
 IMPORT_GEOJSON = True
 IMPORT_WFS = True
+IMPORT_WMS = True
 DELAUNAY = True
 TERRAIN_NODES = True
 TERRAIN_RECLASS = True
@@ -165,6 +166,8 @@ if IMPORT_GEOJSON:
 	from .operators import io_import_geojson
 if IMPORT_WFS:
 	from .operators import io_import_wfs
+if IMPORT_WMS:
+	from .operators import io_import_wms
 if DELAUNAY:
 	from .operators import mesh_delaunay_voronoi
 if TERRAIN_NODES:
@@ -218,6 +221,8 @@ class VIEW3D_MT_menu_gis_import(bpy.types.Menu):
 			self.layout.operator('importgis.geojson_file_dialog', icon_value=icons_dict["shp"].icon_id, text="GeoJSON (.geojson, .json)")
 		if IMPORT_WFS:
 			self.layout.operator('importgis.wfs_service_dialog', icon_value=icons_dict["shp"].icon_id, text="WFS Service (.wfs)")
+		if IMPORT_WMS:
+			self.layout.operator('importgis.wms_service_dialog', icon_value=icons_dict["shp"].icon_id, text="WMS Service")
 
 class VIEW3D_MT_menu_gis_export(bpy.types.Menu):
 	bl_label = "Export"
@@ -342,6 +347,8 @@ def register():
 		io_import_geojson.register()
 	if IMPORT_WFS:
 		io_import_wfs.register()
+	if IMPORT_WMS:
+		io_import_wms.register()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.register()
 	if DROP:
@@ -420,6 +427,8 @@ def unregister():
 		io_import_geojson.unregister()
 	if IMPORT_WFS:
 		io_import_wfs.unregister()
+	if IMPORT_WMS:
+		io_import_wms.unregister()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.unregister()
 	if DROP:

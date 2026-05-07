@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-BlenderGIS is a Blender addon (v2.2.14, requires Blender 2.83+) that adds GIS functionality to Blender: importing shapefiles, georasters, OpenStreetMap data, downloading DEM elevation, displaying web basemaps, and managing scene georeferencing. It is pure Python with no build system.
+BlenderGIS is a Blender addon (v2.2.14, requires Blender 2.83+, compatible through 5.x) that adds GIS functionality to Blender: importing shapefiles, georasters, OpenStreetMap data, downloading DEM elevation, displaying web basemaps, and managing scene georeferencing. It is pure Python with no build system.
 
 ## Installation / Development
 
@@ -33,7 +33,7 @@ There are no tests, no linter config, and no CI setup in this repo.
 
 | Subpackage | Purpose |
 |---|---|
-| `proj/` | Coordinate reprojection. `SRS` parses spatial reference systems; `Reproj` transforms between them using GDAL, PyProj, EPSG.io, or a built-in engine selected automatically |
+| `proj/` | Coordinate reprojection. `SRS` parses spatial reference systems; `Reproj` transforms between them using GDAL, PyProj, EPSG.io, or a built-in engine selected automatically. `_get_reproj(src, dst)` is a module-level `@lru_cache(32)` factory — always use it via `reprojPt/reprojPts/reprojBbox` rather than instantiating `Reproj()` in a loop |
 | `georaster/` | Reading and writing georeferenced raster images (GeoTIFF, etc.) |
 | `basemaps/` | Web map tile fetching, tile matrix grids, GeoPackage tile cache |
 | `maths/` | Interpolation algorithms (Akima, fill-nodata, k-means) |
@@ -53,12 +53,15 @@ Each file implements one Blender operator (UI action):
 | `io_import_gpkg.py` | Import GeoPackage (.gpkg) — GDAL/OGR path + SQLite3 fallback with custom WKB parser |
 | `io_import_geojson.py` | Import GeoJSON (.geojson/.json) — stdlib `json` only, no dependencies |
 | `io_import_wfs.py` | Import from WFS service — 3-operator chain, GetCapabilities, GetFeature→GeoJSON |
+| `io_import_wms.py` | Import WMS imagery — flat georeferenced plane or drape texture on active mesh |
+| `io_import_arcgis_rest.py` | Import from ArcGIS REST Feature Service — 3-operator chain, service metadata→layer picker→paginated GeoJSON fetch |
 | `io_import_osm.py` | Import OpenStreetMap XML |
 | `io_import_georaster.py` | Import georeferenced raster (DEM or texture) |
 | `io_import_asc.py` | Import ESRI ASCII Grid |
 | `io_export_shp.py` | Export to Shapefile |
 | `io_get_dem.py` | Download DEM from OpenTopography / GMRT |
 | `view3d_mapviewer.py` | Interactive web map viewer inside the 3D viewport |
+| `io_import_custom_basemap.py` | Add a custom WMS/WMTS source to the map viewer — fetches GetCapabilities, persists in addon prefs |
 | `nodes_terrain_analysis_builder.py` | Build terrain-analysis shader node tree |
 | `nodes_terrain_analysis_reclassify.py` | Reclassify terrain via shader nodes |
 | `add_camera_georef.py` | Set up camera for georeferenced rendering |
@@ -66,6 +69,15 @@ Each file implements one Blender operator (UI action):
 | `mesh_delaunay_voronoi.py` | Delaunay triangulation / Voronoi diagram |
 | `mesh_earth_sphere.py` | Convert lon/lat mesh to sphere |
 | `object_drop.py` | Drop objects onto a terrain mesh |
+
+### `operators/utils/` — Shared Operator Utilities
+
+| File | What it does |
+|---|---|
+| `bgis_utils.py` | `getBBOX`, `adjust3Dview`, `DropToGround`, `placeObj`, etc. |
+| `http.py` | `http_get(url)` and `format_http_error(e)` — **single shared HTTP helper used by all web-service operators**. Do not define `_http_get()` locally in new operators; import from here. |
+| `georaster_utils.py` | Raster mesh/UV helpers |
+| `delaunay_voronoi.py` | Triangulation algorithms |
 
 ### Dependency Strategy
 
@@ -80,14 +92,17 @@ Optional libraries (GDAL, PyProj, PIL) are detected at startup by `core/checkdep
 
 ---
 
-## Current Development Goal — New Vector Format Importers
+## Current Development Goal — New Format & Service Importers
 
-The active task is implementing new import operators for modern vector formats. Three are complete; one remains:
+The active task is implementing the ESRI File Geodatabase importer. All web-service importers are complete.
 
 ### Completed
 - `operators/io_import_gpkg.py` — GeoPackage (.gpkg) ✓ registered
 - `operators/io_import_geojson.py` — GeoJSON (.geojson/.json) ✓ registered
 - `operators/io_import_wfs.py` — WFS service ✓ registered
+- `operators/io_import_wms.py` — WMS imagery (flat plane / drape on mesh) ✓ registered
+- `operators/io_import_custom_basemap.py` — Custom WMS/WMTS source for map viewer ✓ registered
+- `operators/io_import_arcgis_rest.py` — ArcGIS REST Feature Service ✓ registered (`ARCGIS_REST = True`)
 
 ### Remaining
 - `operators/io_import_gdb.py` — ESRI File Geodatabase (.gdb) importer
@@ -136,7 +151,7 @@ Unknown or unsupported geometry types must trigger a warning, not a crash.
 - Use `core/proj/srs.py SRS` class to parse it
 - Use `GeoScene` from `geoscene.py` to set or verify the scene origin
 - Reproject coordinates to the scene CRS using `core/proj/reproj.py Reproj` if they differ
-- This is identical to what `io_import_shp.py` does — copy that logic directly
+- Logic is identical to what `io_import_shp.py` does — copy that logic directly
 
 ### 7. Attribute / field import
 - Read feature fields via `feature.GetField(field_name)`
@@ -154,7 +169,10 @@ Add the new operators following the exact same pattern as `IMPORT_SHP`. Current 
 IMPORT_GPKG = True
 IMPORT_GEOJSON = True
 IMPORT_WFS = True
-# IMPORT_GDB = True  ← to add
+IMPORT_WMS = True
+CUSTOM_BASEMAP = True
+ARCGIS_REST = True
+# IMPORT_GDB = True  ← pending
 ```
 Each flag has a corresponding conditional import, `register()`, `unregister()`, and menu entry in `VIEW3D_MT_menu_gis_import.draw()`. Menu entries reuse the `"shp"` icon.
 
@@ -173,7 +191,7 @@ Use `self.report({'WARNING'}, ...)` for non-fatal issues and `self.report({'ERRO
 
 ## Development Sequence
 
-**Current status:** GPKG, GeoJSON, and WFS importers are complete and registered. Next: implement `io_import_gdb.py`. GDB is GDAL-only — no SQLite3 fallback (GDB is not SQLite).
+**Current status:** All web-service importers complete. Next: ESRI File Geodatabase.
 
 1. Read `operators/io_import_shp.py` completely ✓
 2. Read `core/checkdeps.py` to understand `HAS_GDAL` ✓
@@ -185,5 +203,13 @@ Use `self.report({'WARNING'}, ...)` for non-fatal issues and `self.report({'ERRO
 8. Register GeoJSON in `__init__.py` ✓ DONE
 9. Implement `operators/io_import_wfs.py` ✓ DONE
 10. Register WFS in `__init__.py` ✓ DONE
-11. Implement `operators/io_import_gdb.py` ← **NEXT**
-12. Register GDB in `__init__.py` and test in Blender
+11. Implement `operators/io_import_wms.py` ✓ DONE
+12. Register WMS in `__init__.py` ✓ DONE
+13. Implement `operators/io_import_custom_basemap.py` ✓ DONE
+14. Register custom basemap in `__init__.py` under GIS > Web geodata ✓ DONE
+15. Implement `operators/io_import_arcgis_rest.py` ✓ DONE
+16. Register ArcGIS REST in `__init__.py` ✓ DONE
+17. Implement `operators/io_import_gdb.py`
+18. Register GDB in `__init__.py` and test in Blender
+
+

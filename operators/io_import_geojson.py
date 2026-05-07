@@ -300,8 +300,11 @@ class IMPORTGIS_OT_geojson_import(Operator):
 		null_geom_count = 0
 		valid_feat_count = 0
 
+		wm = context.window_manager
+		wm.progress_begin(0, nbFeats)
 		for feat_i, feature in enumerate(features):
 
+			wm.progress_update(feat_i)
 			pourcent = round(((feat_i + 1) * 100) / nbFeats)
 			if pourcent in range(0, 110, 10) and pourcent != progress:
 				progress = pourcent
@@ -424,6 +427,8 @@ class IMPORTGIS_OT_geojson_import(Operator):
 				for key, val in props.items():
 					if val is not None:
 						obj[key[:63]] = val
+
+		wm.progress_end()
 
 		if null_geom_count:
 			log.warning("%d features had null/unsupported geometry and were skipped", null_geom_count)

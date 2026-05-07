@@ -1,6 +1,5 @@
 # -*- coding:utf-8 -*-
-import os, sys, json, re
-import xml.etree.ElementTree as ET
+import os, sys, json
 from urllib.error import URLError, HTTPError
 from urllib.parse import urlencode
 
@@ -24,87 +23,72 @@ PKG, SUBPKG = __package__.split('.', maxsplit=1)
 
 
 # ---------------------------------------------------------------------------
-# WFS helpers
+# ArcGIS REST helpers
 # ---------------------------------------------------------------------------
 
-def _strip_ns(tag):
-	"""Remove XML namespace prefix from a tag string."""
-	return tag.split('}')[-1] if '}' in tag else tag
+def _check_arcgis_error(data):
+	"""Raise RuntimeError with human-readable message for ArcGIS error responses."""
+	err = data.get('error')
+	if err is None:
+		return
+	code = err.get('code', 0)
+	message = err.get('message', 'Unknown error')
+	if code == 499:
+		raise RuntimeError(
+			"Token required. This service requires authentication. "
+			"Provide a valid ArcGIS token.")
+	elif code == 498:
+		raise RuntimeError(
+			"Token invalid or expired. Check your ArcGIS token.")
+	elif code == 400:
+		raise RuntimeError(
+			"Bad request (400): {}".format(message))
+	else:
+		raise RuntimeError(
+			"ArcGIS error {}: {}".format(code, message))
 
 
-def _get_capabilities(base_url):
+def _fetch_layers(base_url, token=''):
 	"""
-	Fetch and parse a WFS GetCapabilities document.
+	Fetch service metadata and return only Feature Layer entries.
 
-	Returns a list of dicts:
-	  [{'name': str, 'title': str, 'crs': str or None}, ...]
-	Raises URLError / HTTPError / ET.ParseError on failure.
+	Returns a list of dicts: [{'id': int, 'name': str}, ...]
+	Raises RuntimeError for ArcGIS error responses.
+	Raises URLError / HTTPError on network failure.
 	"""
-	url = base_url.rstrip('?&') + '?SERVICE=WFS&REQUEST=GetCapabilities'
-	data = http_get(url)
-	root = ET.fromstring(data)
-
-	layers = []
-	for elem in root.iter():
-		if _strip_ns(elem.tag) == 'FeatureType':
-			name = next(
-				(c.text for c in elem
-				 if _strip_ns(c.tag) == 'Name' and c.text),
-				None)
-			title = next(
-				(c.text for c in elem
-				 if _strip_ns(c.tag) == 'Title' and c.text),
-				None)
-			crs_text = next(
-				(c.text for c in elem
-				 if _strip_ns(c.tag) in
-				    ('DefaultSRS', 'DefaultCRS', 'OtherSRS', 'OtherCRS')
-				 and c.text),
-				None)
-			if name:
-				layers.append({
-					'name': name,
-					'title': title or name,
-					'crs': crs_text,
-				})
-	return layers
+	url = base_url.rstrip('/') + '?f=json'
+	if token:
+		url += '&token=' + token
+	raw = http_get(url)
+	data = json.loads(raw)
+	_check_arcgis_error(data)
+	return [
+		{'id': l['id'], 'name': l['name']}
+		for l in data.get('layers', [])
+		if l.get('type') == 'Feature Layer'
+	]
 
 
-def _normalize_crs(crs_string):
-	"""
-	Normalize a WFS CRS string to 'EPSG:NNNN' format.
-	Handles 'urn:ogc:def:crs:EPSG::4326', 'EPSG:4326', etc.
-	Returns None if no EPSG code can be extracted.
-	"""
-	if not crs_string:
-		return None
-	m = re.search(r'EPSG[:\s]+(\d+)', crs_string, re.IGNORECASE)
-	if m:
-		return 'EPSG:' + m.group(1)
-	return None
-
-
-def _build_getfeature_url(base_url, layer_name, layer_crs,
-                           max_features=1000, bbox=None):
-	"""
-	Build a WFS GetFeature URL requesting GeoJSON output.
-	Sends both WFS 2.0 and WFS 1.x parameter names for maximum compatibility.
-	"""
+def _build_query_url(service_url, layer_id, token='',
+                     result_offset=0, max_features=1000,
+                     bbox=None, bbox_crs='EPSG:4326'):
 	params = {
-		'SERVICE': 'WFS',
-		'VERSION': '2.0.0',
-		'REQUEST': 'GetFeature',
-		'TYPENAMES': layer_name,      # WFS 2.0
-		'TYPENAME': layer_name,       # WFS 1.x fallback
-		'OUTPUTFORMAT': 'application/json',
-		'COUNT': str(max_features),   # WFS 2.0
-		'MAXFEATURES': str(max_features),  # WFS 1.x fallback
+		'where': '1=1',
+		'outFields': '*',
+		'f': 'geojson',
+		'resultOffset': str(result_offset),
+		'resultRecordCount': str(max_features),
 	}
-	if bbox is not None and layer_crs:
-		epsg_code = layer_crs.split(':')[-1]
-		params['BBOX'] = '{},{},{},{},urn:ogc:def:crs:EPSG::{}'.format(
-			bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax, epsg_code)
-	return base_url.rstrip('?&') + '?' + urlencode(params)
+	if bbox is not None:
+		params['geometry'] = '{},{},{},{}'.format(
+			bbox.xmin, bbox.ymin, bbox.xmax, bbox.ymax)
+		params['geometryType'] = 'esriGeometryEnvelope'
+		params['inSR'] = bbox_crs.split(':')[-1]
+		params['spatialRel'] = 'esriSpatialRelIntersects'
+	if token:
+		params['token'] = token
+	return '{}/{}/query?{}'.format(
+		service_url.rstrip('/'), layer_id, urlencode(params))
 
 
 # ---------------------------------------------------------------------------
@@ -112,17 +96,12 @@ def _build_getfeature_url(base_url, layer_name, layer_crs,
 # ---------------------------------------------------------------------------
 
 def _coords_to_xy_zs(coords):
-	"""
-	Convert a list of GeoJSON coordinate positions to (xy_list, z_list).
-	Each position is [x, y] or [x, y, z].
-	"""
 	xy = [(c[0], c[1]) for c in coords]
 	zs = [c[2] if len(c) >= 3 else 0.0 for c in coords]
 	return xy, zs
 
 
 def _has_z(coords):
-	"""Return True if any coordinate position in a flat list has a Z value."""
 	return any(len(c) >= 3 for c in coords)
 
 
@@ -130,136 +109,122 @@ def _has_z(coords):
 # Operator 1 — Service URL dialog
 # ---------------------------------------------------------------------------
 
-class IMPORTGIS_OT_wfs_service_dialog(Operator):
-	"""Enter WFS service base URL"""
+class IMPORTGIS_OT_arcgis_rest_service_dialog(Operator):
+	"""Enter ArcGIS REST FeatureServer or MapServer base URL"""
 
-	bl_idname = "importgis.wfs_service_dialog"
-	bl_description = "Import features from a WFS (OGC Web Feature Service)"
-	bl_label = "Import WFS"
+	bl_idname = "importgis.arcgis_rest_service_dialog"
+	bl_description = "Import features from an ArcGIS REST Feature Service"
+	bl_label = "Import ArcGIS REST Feature Service"
 	bl_options = {'INTERNAL'}
 
 	serviceUrl: StringProperty(
-		name="Service URL",
-		description="Base URL of the WFS service (without query parameters)",
+		name="FeatureServer URL",
+		description="Base URL ending in /FeatureServer or /MapServer (no layer ID)",
+		default="")
+
+	token: StringProperty(
+		name="Token (optional)",
+		description="Leave empty for public services",
 		default="")
 
 	def invoke(self, context, event):
-		return context.window_manager.invoke_props_dialog(self)
+		return context.window_manager.invoke_props_dialog(self, width=500)
 
 	def draw(self, context):
 		layout = self.layout
+		layout.label(text="ArcGIS REST Feature Service", icon='URL')
 		layout.prop(self, 'serviceUrl')
+		layout.prop(self, 'token')
+		layout.label(
+			text="Example: .../FeatureServer or .../MapServer",
+			icon='INFO')
 
 	@classmethod
 	def poll(cls, context):
 		return context.mode == 'OBJECT'
 
 	def execute(self, context):
-		url = self.serviceUrl.strip()
+		url = self.serviceUrl.strip().rstrip('/')
 		if not url:
-			self.report({'ERROR'}, "Please enter a WFS service URL")
+			self.report({'ERROR'}, "Enter a service URL")
 			return {'CANCELLED'}
-		bpy.ops.importgis.wfs_layer_dialog('INVOKE_DEFAULT', serviceUrl=url)
+		try:
+			bpy.ops.importgis.arcgis_rest_layer_dialog('INVOKE_DEFAULT',
+				serviceUrl=url, token=self.token)
+		except RuntimeError:
+			return {'CANCELLED'}
 		return {'FINISHED'}
 
 
 # ---------------------------------------------------------------------------
-# Operator 2 — Layer selection dialog (fetches GetCapabilities)
+# Operator 2 — Layer selection dialog
 # ---------------------------------------------------------------------------
 
-class IMPORTGIS_OT_wfs_layer_dialog(Operator):
-	"""Fetch available layers from a WFS service and let the user choose one"""
+class IMPORTGIS_OT_arcgis_rest_layer_dialog(Operator):
+	"""Fetch available Feature Layers and let the user choose one"""
 
-	bl_idname = "importgis.wfs_layer_dialog"
-	bl_description = "Select a WFS layer to import"
-	bl_label = "Import WFS — Select Layer"
+	bl_idname = "importgis.arcgis_rest_layer_dialog"
+	bl_description = "Select an ArcGIS REST Feature Layer to import"
+	bl_label = "Import ArcGIS REST — Select Layer"
 	bl_options = {'INTERNAL'}
 
 	serviceUrl: StringProperty()
+	token: StringProperty()
 
-	# Cache for the capabilities result so listLayers() doesn't re-fetch
-	# on every redraw. Stored as a class variable keyed by URL.
-	_caps_cache = {}
+	# Cache populated in invoke() before dialog opens so listLayers()
+	# does not re-fetch on every enum redraw.
+	_last_layers = []  # list of {'id': int, 'name': str}
+	_last_url = ''
 
 	def listLayers(self, context):
-		url = self.serviceUrl.strip()
-		if not url:
-			return [('NONE', '(no URL)', '')]
-		if url not in IMPORTGIS_OT_wfs_layer_dialog._caps_cache:
-			try:
-				layers = _get_capabilities(url)
-				IMPORTGIS_OT_wfs_layer_dialog._caps_cache[url] = layers
-			except Exception as e:
-				log.error("GetCapabilities failed: %s", e)
-				return [('NONE', '(failed to fetch layers)', '')]
-		layers = IMPORTGIS_OT_wfs_layer_dialog._caps_cache.get(url, [])
+		layers = IMPORTGIS_OT_arcgis_rest_layer_dialog._last_layers
 		if not layers:
-			return [('NONE', '(no layers found)', '')]
-		return [(l['name'], l['title'], l['name']) for l in layers]
+			return [('NONE', '(no layers)', '')]
+		return [(str(l['id']), l['name'], 'ID: {}'.format(l['id']))
+		        for l in layers]
 
-	layerName: EnumProperty(
+	layerId: EnumProperty(
 		name="Layer",
-		description="WFS feature type to import",
+		description="Feature Layer to import",
 		items=listLayers)
 
 	def check(self, context):
 		return True
 
 	def invoke(self, context, event):
-		# Pre-populate the cache before the dialog opens so the enum
-		# is populated on first draw.
-		url = self.serviceUrl.strip()
-		if url and url not in IMPORTGIS_OT_wfs_layer_dialog._caps_cache:
-			try:
-				layers = _get_capabilities(url)
-				IMPORTGIS_OT_wfs_layer_dialog._caps_cache[url] = layers
-			except (URLError, HTTPError) as e:
-				code = getattr(e, 'code', None)
-				if code in (401, 403):
-					self.report({'ERROR'},
-						"Access denied ({}). This service requires authentication.".format(code))
-				elif code == 404:
-					self.report({'ERROR'}, "Service not found. Check the URL.")
-				elif code is not None:
-					self.report({'ERROR'},
-						"HTTP error {}: {}".format(code, getattr(e, 'reason', '')))
-				else:
-					self.report({'ERROR'},
-						"Cannot reach service. Check URL and connection.")
-				return {'CANCELLED'}
-			except ET.ParseError as e:
+		try:
+			layers = _fetch_layers(self.serviceUrl, self.token)
+			IMPORTGIS_OT_arcgis_rest_layer_dialog._last_layers = layers
+			IMPORTGIS_OT_arcgis_rest_layer_dialog._last_url = self.serviceUrl
+			if not layers:
 				self.report({'ERROR'},
-					"Could not parse GetCapabilities response: {}".format(e))
+					"No Feature Layers found in this service")
 				return {'CANCELLED'}
-			except Exception as e:
-				self.report({'ERROR'},
-					"GetCapabilities failed: {}".format(e))
-				return {'CANCELLED'}
-		return context.window_manager.invoke_props_dialog(self)
+		except RuntimeError as e:
+			self.report({'ERROR'}, str(e))
+			return {'CANCELLED'}
+		except (URLError, HTTPError) as e:
+			self.report({'ERROR'}, format_http_error(e))
+			return {'CANCELLED'}
+		except json.JSONDecodeError as e:
+			self.report({'ERROR'},
+				"Cannot parse service metadata: {}".format(e))
+			return {'CANCELLED'}
+		return context.window_manager.invoke_props_dialog(self, width=400)
 
 	def draw(self, context):
 		layout = self.layout
 		layout.label(text="URL: " + self.serviceUrl[:60], icon='URL')
-		layout.prop(self, 'layerName')
+		layout.prop(self, 'layerId')
 
 	def execute(self, context):
-		if self.layerName == 'NONE':
-			self.report({'ERROR'}, "No layer selected")
+		if self.layerId == 'NONE':
+			self.report({'ERROR'}, "Select a layer")
 			return {'CANCELLED'}
-
-		# Find the CRS for the selected layer from the cache
-		url = self.serviceUrl.strip()
-		caps = IMPORTGIS_OT_wfs_layer_dialog._caps_cache.get(url, [])
-		layer_crs = ''
-		for l in caps:
-			if l['name'] == self.layerName:
-				layer_crs = _normalize_crs(l['crs']) or ''
-				break
-
-		bpy.ops.importgis.wfs_import('INVOKE_DEFAULT',
-			serviceUrl=url,
-			layerName=self.layerName,
-			layerCRS=layer_crs)
+		bpy.ops.importgis.arcgis_rest_import('INVOKE_DEFAULT',
+			serviceUrl=self.serviceUrl,
+			token=self.token,
+			layerId=self.layerId)
 		return {'FINISHED'}
 
 
@@ -267,26 +232,24 @@ class IMPORTGIS_OT_wfs_layer_dialog(Operator):
 # Operator 3 — Import options and execute
 # ---------------------------------------------------------------------------
 
-class IMPORTGIS_OT_wfs_import(Operator):
-	"""Import options and geometry builder for a WFS layer"""
+class IMPORTGIS_OT_arcgis_rest_import(Operator):
+	"""Import options and geometry builder for an ArcGIS REST Feature Layer"""
 
-	bl_idname = "importgis.wfs_import"
-	bl_description = "Import features from a WFS layer"
-	bl_label = "Import WFS Layer"
+	bl_idname = "importgis.arcgis_rest_import"
+	bl_description = "Import features from an ArcGIS REST Feature Layer"
+	bl_label = "Import ArcGIS REST Layer"
 	bl_options = {"UNDO"}
 
 	serviceUrl: StringProperty()
-	layerName:  StringProperty()
-	layerCRS:   StringProperty()  # normalized 'EPSG:NNNN' or empty
+	token: StringProperty()
+	layerId: StringProperty()
 
 	def listPredefCRS(self, context):
 		return PredefCRS.getEnumItems()
 
 	reprojection: BoolProperty(
-		name="Override CRS",
-		description=(
-			"Override the CRS detected from GetCapabilities. "
-			"Use when the service reports a wrong or missing CRS."),
+		name="Specify CRS",
+		description="Override default WGS84 CRS",
 		default=False)
 
 	layerCRSOverride: EnumProperty(
@@ -309,11 +272,11 @@ class IMPORTGIS_OT_wfs_import(Operator):
 		default=False)
 
 	maxFeatures: IntProperty(
-		name="Max Features",
-		description="Maximum number of features to download",
+		name="Max features per page",
+		description="Maximum number of features to request per page",
 		default=1000,
 		min=1,
-		max=100000)
+		max=5000)
 
 	useBbox: BoolProperty(
 		name="Filter by scene extent",
@@ -335,14 +298,18 @@ class IMPORTGIS_OT_wfs_import(Operator):
 	def draw(self, context):
 		layout = self.layout
 
-		layout.label(text="Engine: WFS → GeoJSON (urllib)", icon='INFO')
+		layout.label(text="Engine: ArcGIS REST → GeoJSON", icon='INFO')
 
-		# Read-only service info
 		box = layout.box()
 		box.label(text="Service: " + self.serviceUrl[:55], icon='URL')
-		box.label(text="Layer: " + self.layerName, icon='MESH_DATA')
-		if self.layerCRS:
-			box.label(text="Detected CRS: " + self.layerCRS)
+		# Look up layer name for display
+		layer_id_int = int(self.layerId) if self.layerId.isdigit() else -1
+		layer_name = next(
+			(l['name'] for l in IMPORTGIS_OT_arcgis_rest_layer_dialog._last_layers
+			 if l['id'] == layer_id_int),
+			'Layer ' + self.layerId)
+		box.label(text="Layer: {} (ID {})".format(layer_name, self.layerId),
+		          icon='MESH_DATA')
 
 		layout.prop(self, 'maxFeatures')
 		layout.prop(self, 'useBbox')
@@ -361,7 +328,7 @@ class IMPORTGIS_OT_wfs_import(Operator):
 				self._crs_layout(layout)
 
 	def invoke(self, context, event):
-		return context.window_manager.invoke_props_dialog(self)
+		return context.window_manager.invoke_props_dialog(self, width=420)
 
 	@classmethod
 	def poll(cls, context):
@@ -377,16 +344,15 @@ class IMPORTGIS_OT_wfs_import(Operator):
 
 		bpy.ops.object.select_all(action='DESELECT')
 
-		fileName = self.layerName
+		# --- Resolve layer name for object/collection naming ---
+		layer_id_int = int(self.layerId) if self.layerId.isdigit() else -1
+		fileName = next(
+			(l['name'] for l in IMPORTGIS_OT_arcgis_rest_layer_dialog._last_layers
+			 if l['id'] == layer_id_int),
+			'Layer_' + self.layerId)
 
-		# --- Determine layer CRS ---
-		if self.reprojection:
-			layerCRS = self.layerCRSOverride
-		elif self.layerCRS:
-			layerCRS = self.layerCRS
-		else:
-			log.warning("No CRS from GetCapabilities; assuming EPSG:4326")
-			layerCRS = "EPSG:4326"
+		# --- Determine layer CRS (always WGS84 unless overridden) ---
+		layerCRS = self.layerCRSOverride if self.reprojection else 'EPSG:4326'
 
 		# --- GeoScene check ---
 		geoscn = GeoScene()
@@ -394,67 +360,80 @@ class IMPORTGIS_OT_wfs_import(Operator):
 			self.report({'ERROR'}, "Scene georef is broken, please fix it beforehand")
 			return {'CANCELLED'}
 
-		# --- Build bbox filter in layer CRS if requested ---
-		req_bbox = None
+		# --- Build spatial filter bbox in EPSG:4326 ---
+		query_bbox = None
 		if self.useBbox and geoscn.isGeoref:
 			try:
-				from ..core.proj import reprojBbox
 				scene_bbox = getBBOX.fromScn(context.scene).to2D().toGeo(geoscn)
-				if scene_bbox is not None:
-					if geoscn.crs != layerCRS:
-						req_bbox = reprojBbox(geoscn.crs, layerCRS, scene_bbox)
-					else:
-						req_bbox = scene_bbox
+				if geoscn.crs != 'EPSG:4326':
+					rprj_to_wgs = Reproj(geoscn.crs, 'EPSG:4326')
+					query_bbox = rprj_to_wgs.bbox(scene_bbox)
+				else:
+					query_bbox = scene_bbox
 			except Exception as e:
 				log.warning("Could not compute bbox filter: %s", e)
-				req_bbox = None
+				query_bbox = None
 
-		# --- Build GetFeature URL ---
-		url = _build_getfeature_url(
-			self.serviceUrl, self.layerName, layerCRS,
-			max_features=self.maxFeatures,
-			bbox=req_bbox)
-		log.debug("WFS GetFeature URL: %s", url)
+		# --- Paginated feature fetch ---
+		all_features = []
+		offset = 0
+		page = 0
+		while True:
+			url = _build_query_url(
+				self.serviceUrl, self.layerId, self.token,
+				result_offset=offset,
+				max_features=self.maxFeatures,
+				bbox=query_bbox,
+				bbox_crs='EPSG:4326')
+			log.debug("ArcGIS REST query URL: %s", url)
 
-		# --- HTTP GET ---
-		try:
-			raw = http_get(url)
-		except HTTPError as e:
-			code = e.code
-			if code in (401, 403):
-				self.report({'ERROR'},
-					"Access denied ({}). This service requires authentication.".format(code))
-			elif code == 404:
-				self.report({'ERROR'}, "Service not found. Check the URL.")
-			else:
-				self.report({'ERROR'},
-					"HTTP error {}: {}".format(code, getattr(e, 'reason', '')))
-			return {'CANCELLED'}
-		except URLError as e:
-			self.report({'ERROR'},
-				"Cannot reach service. Check URL and connection.")
+			try:
+				raw = http_get(url)
+			except (URLError, HTTPError) as e:
+				self.report({'ERROR'}, format_http_error(e))
+				return {'CANCELLED'}
+
+			try:
+				gj = json.loads(raw)
+			except json.JSONDecodeError as e:
+				self.report({'ERROR'}, "Invalid JSON response: {}".format(e))
+				return {'CANCELLED'}
+
+			try:
+				_check_arcgis_error(gj)
+			except RuntimeError as e:
+				self.report({'ERROR'}, str(e))
+				return {'CANCELLED'}
+
+			page_features = gj.get('features', [])
+			all_features.extend(page_features)
+
+			page += 1
+			print("Page {}: {} features (total so far: {})".format(
+				page, len(page_features), len(all_features)))
+			sys.stdout.flush()
+
+			if not gj.get('exceededTransferLimit', False):
+				break
+			if not page_features:
+				# Safety: server says more data but returned nothing — stop.
+				log.warning("exceededTransferLimit but empty page at offset %d; stopping", offset)
+				break
+			offset += self.maxFeatures
+
+		if not all_features:
+			self.report({'ERROR'}, "No features returned by service")
 			return {'CANCELLED'}
 
-		# --- Check we got JSON not GML ---
-		if raw.lstrip()[:1] == b'<':
-			self.report({'ERROR'},
-				"Server returned GML instead of GeoJSON. "
-				"This WFS version may not support JSON output.")
-			return {'CANCELLED'}
-
-		# --- Parse JSON ---
-		try:
-			gj = json.loads(raw)
-		except json.JSONDecodeError as e:
-			self.report({'ERROR'}, "Cannot parse server response as JSON: {}".format(e))
-			return {'CANCELLED'}
+		# Wrap accumulated pages into a single FeatureCollection for the mesh builder.
+		gj = {'type': 'FeatureCollection', 'features': all_features}
 
 		# ===================================================================
 		# From here: logic copied verbatim from io_import_geojson.py execute()
 		# Differences:
-		#   - layerCRS already determined above (not from file content)
-		#   - fileName = self.layerName (not a filepath basename)
-		#   - No file open() needed — gj is already parsed
+		#   - layerCRS already determined above (hardcoded EPSG:4326 or override)
+		#   - fileName = layer name resolved from _last_layers
+		#   - No file open() needed — gj is already assembled
 		# ===================================================================
 
 		if gj.get('type') != 'FeatureCollection':
@@ -463,7 +442,7 @@ class IMPORTGIS_OT_wfs_import(Operator):
 
 		features = gj.get('features', [])
 		if not features:
-			self.report({'ERROR'}, "No features returned by the service")
+			self.report({'ERROR'}, "No features returned by service")
 			return {'CANCELLED'}
 
 		nbFeats = len(features)
@@ -547,7 +526,7 @@ class IMPORTGIS_OT_wfs_import(Operator):
 		else:
 			dx, dy = geoscn.getOriginPrj()
 
-		log.info("WFS '%s': %d features", fileName, nbFeats)
+		log.info("ArcGIS REST '%s': %d features", fileName, nbFeats)
 
 		# --- Build mesh ---
 		bm = bmesh.new()
@@ -582,7 +561,6 @@ class IMPORTGIS_OT_wfs_import(Operator):
 			gt = geom.get('type', '')
 			coords = geom.get('coordinates', [])
 
-			# Normalise to a list of (single_type, coords_for_one_part) tuples
 			parts = []
 			if gt == 'Point':
 				parts = [('Point', coords)]
@@ -626,7 +604,7 @@ class IMPORTGIS_OT_wfs_import(Operator):
 						raw_xy = rprj.pts(raw_xy)
 					use_z = self.elevSource == 'GEOM' and fhas_z
 					pts3d = [(x - dx, y - dy, z if use_z else 0.0)
-							 for (x, y), z in zip(raw_xy, zs)]
+					         for (x, y), z in zip(raw_xy, zs)]
 					verts = [bm.verts.new(p) for p in pts3d]
 					for i in range(len(verts) - 1):
 						try:
@@ -635,8 +613,6 @@ class IMPORTGIS_OT_wfs_import(Operator):
 							log.warning("Feature %d: duplicate edge %d-%d, skipping", feat_i, i, i + 1)
 
 				elif part_type == 'Polygon':
-					# part_coords is a list of rings; ring 0 = exterior, 1+ = holes
-					# GeoJSON exterior rings are CCW per RFC 7946; just drop closing pt
 					for r_i, ring in enumerate(part_coords):
 						if not ring or len(ring) < 4:
 							continue
@@ -646,8 +622,7 @@ class IMPORTGIS_OT_wfs_import(Operator):
 							raw_xy = rprj.pts(raw_xy)
 						use_z = self.elevSource == 'GEOM' and fhas_z
 						pts3d = [(x - dx, y - dy, z if use_z else 0.0)
-								 for (x, y), z in zip(raw_xy, zs)]
-						# Drop the closing duplicate point
+						         for (x, y), z in zip(raw_xy, zs)]
 						pts3d.pop()
 						if len(pts3d) < 3:
 							continue
@@ -719,7 +694,6 @@ class IMPORTGIS_OT_wfs_import(Operator):
 			for feature in features:
 				p = feature.get('properties') or {}
 				props_list.append(p)
-			# Store properties from first feature as representative custom props
 			if props_list:
 				for key, val in props_list[0].items():
 					if val is not None:
@@ -728,7 +702,7 @@ class IMPORTGIS_OT_wfs_import(Operator):
 		bm.free()
 
 		t = perf_clock() - t0
-		log.info("WFS import completed in %.3f seconds", t)
+		log.info("ArcGIS REST import completed in %.3f seconds", t)
 
 		if prefs.adjust3Dview:
 			bbox.shift(-dx, -dy)
@@ -738,9 +712,9 @@ class IMPORTGIS_OT_wfs_import(Operator):
 
 
 classes = [
-	IMPORTGIS_OT_wfs_service_dialog,
-	IMPORTGIS_OT_wfs_layer_dialog,
-	IMPORTGIS_OT_wfs_import,
+	IMPORTGIS_OT_arcgis_rest_service_dialog,
+	IMPORTGIS_OT_arcgis_rest_layer_dialog,
+	IMPORTGIS_OT_arcgis_rest_import,
 ]
 
 def register():

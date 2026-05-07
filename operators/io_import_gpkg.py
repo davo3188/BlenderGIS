@@ -463,8 +463,11 @@ class IMPORTGIS_OT_gpkg_import(Operator):
 			valid_feat_count = 0
 
 			layer.ResetReading()
+			wm = context.window_manager
+			wm.progress_begin(0, nbFeats)
 			for feat_i, feature in enumerate(layer):
 
+				wm.progress_update(feat_i)
 				pourcent = round(((feat_i + 1) * 100) / nbFeats)
 				if pourcent in range(0, 110, 10) and pourcent != progress:
 					progress = pourcent
@@ -577,6 +580,8 @@ class IMPORTGIS_OT_gpkg_import(Operator):
 						val = feature.GetField(field_i)
 						if val is not None:
 							obj[prop_name] = val
+
+			wm.progress_end()
 
 			# Close datasource
 			ds = None
@@ -745,8 +750,11 @@ class IMPORTGIS_OT_gpkg_import(Operator):
 		null_geom_count = 0
 		valid_feat_count = 0
 
+		wm = context.window_manager
+		wm.progress_begin(0, nbFeats)
 		for feat_i, row in enumerate(con.execute(query)):
 
+			wm.progress_update(feat_i)
 			pourcent = round(((feat_i + 1) * 100) / nbFeats)
 			if pourcent in range(0, 110, 10) and pourcent != progress:
 				progress = pourcent
@@ -849,6 +857,8 @@ class IMPORTGIS_OT_gpkg_import(Operator):
 					val = row[j + 1]  # row[0] is the geometry blob
 					if val is not None:
 						obj[prop_name] = val
+
+		wm.progress_end()
 
 		con.close()
 

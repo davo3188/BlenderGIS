@@ -40,9 +40,9 @@ class BlenderVersionError(Exception):
 	pass
 
 if bl_info['blender'] > bpy.app.version:
-	raise BlenderVersionError(f"This addon requires Blender >= {bl_info['blender']}")
-if bpy.app.version[0] > 5: #prevent breaking changes on major release
-	raise BlenderVersionError(f"This addon is not tested against Blender {bpy.app.version[0]}.x breaking changes")
+	raise BlenderVersionError(
+		"BlenderGIS requires Blender 2.83 or newer. "
+		"Current version: {}".format(bpy.app.version))
 
 
 #Modules
@@ -59,6 +59,7 @@ IMPORT_GEOJSON = True
 IMPORT_WFS = True
 IMPORT_WMS = True
 CUSTOM_BASEMAP = True
+ARCGIS_REST = True
 DELAUNAY = True
 TERRAIN_NODES = True
 TERRAIN_RECLASS = True
@@ -171,6 +172,8 @@ if IMPORT_WMS:
 	from .operators import io_import_wms
 if CUSTOM_BASEMAP:
 	from .operators import io_import_custom_basemap
+if ARCGIS_REST:
+	from .operators import io_import_arcgis_rest
 if DELAUNAY:
 	from .operators import mesh_delaunay_voronoi
 if TERRAIN_NODES:
@@ -226,6 +229,8 @@ class VIEW3D_MT_menu_gis_import(bpy.types.Menu):
 			self.layout.operator('importgis.wfs_service_dialog', icon_value=icons_dict["shp"].icon_id, text="WFS Service (.wfs)")
 		if IMPORT_WMS:
 			self.layout.operator('importgis.wms_service_dialog', icon_value=icons_dict["shp"].icon_id, text="WMS Service")
+		if ARCGIS_REST:
+			self.layout.operator('importgis.arcgis_rest_service_dialog', icon_value=icons_dict["shp"].icon_id, text="ArcGIS REST Feature Service")
 
 class VIEW3D_MT_menu_gis_export(bpy.types.Menu):
 	bl_label = "Export"
@@ -356,6 +361,8 @@ def register():
 		io_import_wms.register()
 	if CUSTOM_BASEMAP:
 		io_import_custom_basemap.register()
+	if ARCGIS_REST:
+		io_import_arcgis_rest.register()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.register()
 	if DROP:
@@ -438,6 +445,8 @@ def unregister():
 		io_import_wms.unregister()
 	if CUSTOM_BASEMAP:
 		io_import_custom_basemap.unregister()
+	if ARCGIS_REST:
+		io_import_arcgis_rest.unregister()
 	if DELAUNAY:
 		mesh_delaunay_voronoi.unregister()
 	if DROP:

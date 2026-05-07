@@ -3,7 +3,6 @@
 import hashlib
 import os
 import xml.etree.ElementTree as ET
-from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
 import bpy
@@ -21,23 +20,14 @@ from ..core import BBOX
 
 from .utils import getBBOX, placeObj, adjust3Dview, showTextures, addTexture
 from .utils import rasterExtentToMesh, geoRastUVmap
-
-from ..core import settings
-USER_AGENT = settings.user_agent
+from .utils.http import http_get, format_http_error
 
 PKG, SUBPKG = __package__.split('.', maxsplit=1)
 
-TIMEOUT = 30
-
 
 # ---------------------------------------------------------------------------
-# HTTP + XML helpers
+# XML helpers
 # ---------------------------------------------------------------------------
-
-def _http_get(url):
-	rq = Request(url, headers={'User-Agent': USER_AGENT})
-	with urlopen(rq, timeout=TIMEOUT) as r:
-		return r.read()
 
 
 def _strip_ns(tag):
@@ -55,7 +45,7 @@ def _get_wms_capabilities(base_url, version='1.1.1'):
 	"""
 	url = (base_url.rstrip('?&') +
 	       '?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=' + version)
-	data = _http_get(url)
+	data = http_get(url)
 	root = ET.fromstring(data)
 
 	# Collect GetMap formats

@@ -6,7 +6,6 @@ import os
 import xml.etree.ElementTree as ET
 from urllib.error import URLError, HTTPError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 import bpy
 from bpy.props import StringProperty, EnumProperty, IntProperty
@@ -17,22 +16,14 @@ log = logging.getLogger(__name__)
 from ..core.basemaps import GRIDS
 from ..core.basemaps.servicesDefs import SOURCES
 
-from ..core import settings
-USER_AGENT = settings.user_agent
+from .utils.http import http_get, format_http_error
 
 PKG, SUBPKG = __package__.split('.', maxsplit=1)
 
-TIMEOUT = 30
-
 
 # ---------------------------------------------------------------------------
-# HTTP + XML helpers (copied from io_import_wms.py to avoid circular imports)
+# XML helpers
 # ---------------------------------------------------------------------------
-
-def _http_get(url):
-	rq = Request(url, headers={'User-Agent': USER_AGENT})
-	with urlopen(rq, timeout=TIMEOUT) as r:
-		return r.read()
 
 
 def _strip_ns(tag):
@@ -50,7 +41,7 @@ def _get_wms_capabilities(base_url, version='1.1.1'):
 	"""
 	url = (base_url.rstrip('?&') +
 	       '?SERVICE=WMS&REQUEST=GetCapabilities&VERSION=' + version)
-	data = _http_get(url)
+	data = http_get(url)
 	root = ET.fromstring(data)
 
 	formats = []

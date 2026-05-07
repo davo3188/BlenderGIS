@@ -323,26 +323,23 @@ class Reproj():
 
 
 
+from functools import lru_cache
+
+@lru_cache(maxsize=32)
+def _get_reproj(src_crs: str, dst_crs: str) -> 'Reproj':
+	"""Cached Reproj factory — avoids re-initializing for same CRS pair."""
+	return Reproj(src_crs, dst_crs)
+
+
 def reprojPt(crs1, crs2, x, y):
-	"""
-	Reproject x1,y1 coords from crs1 to crs2
-	crs can be an EPSG code (interger or string) or a proj4 string
-	WARN : do not use this function in a loop because Reproj() init is slow
-	"""
-	rprj = Reproj(crs1, crs2)
-	return rprj.pt(x, y)
+	"""Reproject x,y coords from crs1 to crs2."""
+	return _get_reproj(str(crs1), str(crs2)).pt(x, y)
 
 
 def reprojPts(crs1, crs2, pts):
-	"""
-	Reproject [pts] from crs1 to crs2
-	crs can be an EPSG code (integer or srid string) or a proj4 string
-	pts must be [(x,y)]
-	WARN : do not use this function in a loop because Reproj() init is slow
-	"""
-	rprj = Reproj(crs1, crs2)
-	return rprj.pts(pts)
+	"""Reproject [(x,y)] list from crs1 to crs2."""
+	return _get_reproj(str(crs1), str(crs2)).pts(pts)
+
 
 def reprojBbox(crs1, crs2, bbox):
-	rprj = Reproj(crs1, crs2)
-	return rprj.bbox(bbox)
+	return _get_reproj(str(crs1), str(crs2)).bbox(bbox)
